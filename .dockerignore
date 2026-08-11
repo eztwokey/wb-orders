@@ -1,0 +1,10 @@
+.git
+.gitignore
+.gitlab-ci.yml
+.idea
+.vscode
+bin
+dist
+coverage.out
+*.md
+docs

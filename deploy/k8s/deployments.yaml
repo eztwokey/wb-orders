@@ -1,0 +1,107 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-service
+  namespace: wb-orders
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app.kubernetes.io/name: order-service }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: order-service }
+    spec:
+      terminationGracePeriodSeconds: 30
+      imagePullSecrets: [{ name: gitlab-registry }]
+      containers:
+        - name: order-service
+          image: registry.gitlab.com/your-gitlab-namespace/wb-orders/order-service:latest
+          imagePullPolicy: IfNotPresent
+          ports: [{ name: http, containerPort: 8080 }]
+          envFrom:
+            - configMapRef: { name: wb-orders-config }
+            - secretRef: { name: wb-orders-secret }
+          env: [{ name: HEALTH_ADDR, value: ":8080" }]
+          readinessProbe:
+            httpGet: { path: /ready, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 2
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 2
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: outbox-publisher
+  namespace: wb-orders
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app.kubernetes.io/name: outbox-publisher }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: outbox-publisher }
+    spec:
+      terminationGracePeriodSeconds: 30
+      imagePullSecrets: [{ name: gitlab-registry }]
+      containers:
+        - name: outbox-publisher
+          image: registry.gitlab.com/your-gitlab-namespace/wb-orders/outbox-publisher:latest
+          imagePullPolicy: IfNotPresent
+          ports: [{ name: health, containerPort: 8081 }]
+          envFrom:
+            - configMapRef: { name: wb-orders-config }
+            - secretRef: { name: wb-orders-secret }
+          env: [{ name: HEALTH_ADDR, value: ":8081" }]
+          readinessProbe:
+            httpGet: { path: /ready, port: health }
+            periodSeconds: 5
+            timeoutSeconds: 2
+          livenessProbe:
+            httpGet: { path: /health, port: health }
+            periodSeconds: 10
+            timeoutSeconds: 2
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-worker
+  namespace: wb-orders
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app.kubernetes.io/name: order-worker }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: order-worker }
+    spec:
+      terminationGracePeriodSeconds: 45
+      imagePullSecrets: [{ name: gitlab-registry }]
+      containers:
+        - name: order-worker
+          image: registry.gitlab.com/your-gitlab-namespace/wb-orders/order-worker:latest
+          imagePullPolicy: IfNotPresent
+          ports: [{ name: health, containerPort: 8082 }]
+          envFrom:
+            - configMapRef: { name: wb-orders-config }
+            - secretRef: { name: wb-orders-secret }
+          env: [{ name: HEALTH_ADDR, value: ":8082" }]
+          readinessProbe:
+            httpGet: { path: /ready, port: health }
+            periodSeconds: 5
+            timeoutSeconds: 2
+          livenessProbe:
+            httpGet: { path: /health, port: health }
+            periodSeconds: 10
+            timeoutSeconds: 2
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits: { cpu: "1", memory: 512Mi }

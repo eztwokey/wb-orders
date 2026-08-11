@@ -1,0 +1,179 @@
+openapi: 3.0.3
+info:
+  title: WB Orders API
+  version: 1.0.0
+  description: Event-driven marketplace order processing portfolio project.
+  license:
+    name: MIT
+    url: https://opensource.org/license/mit
+servers:
+  - url: /
+security: []
+paths:
+  /api/v1/orders:
+    post:
+      operationId: createOrder
+      summary: Create an order
+      parameters:
+        - $ref: "#/components/parameters/RequestID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateOrderRequest"
+      responses:
+        "201":
+          description: Order and its OrderCreated outbox event were committed.
+          headers:
+            Location:
+              schema: { type: string }
+            X-Request-ID:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /api/v1/orders/{id}:
+    get:
+      operationId: getOrder
+      summary: Get an order by id
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: "#/components/parameters/RequestID"
+      responses:
+        "200":
+          description: Current persisted order state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404":
+          description: Order not found.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /health:
+    get:
+      operationId: health
+      summary: Liveness endpoint
+      responses:
+        "200":
+          description: Process is alive.
+  /ready:
+    get:
+      operationId: readiness
+      summary: Readiness endpoint
+      responses:
+        "200": { description: Dependencies are ready. }
+        "503": { description: A required dependency is unavailable. }
+  /metrics:
+    get:
+      operationId: metrics
+      summary: Prometheus metrics
+      responses:
+        "200": { description: Prometheus text exposition format. }
+components:
+  parameters:
+    RequestID:
+      name: X-Request-ID
+      in: header
+      required: false
+      schema: { type: string, maxLength: 128 }
+  schemas:
+    OrderItem:
+      type: object
+      required: [sku, quantity, unit_price_minor]
+      additionalProperties: false
+      properties:
+        sku:
+          { type: string, minLength: 1, maxLength: 128, example: keyboard-01 }
+        quantity: { type: integer, format: int32, minimum: 1, example: 2 }
+        unit_price_minor:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Price in the currency's minor units; never a floating-point value.
+          example: 129900
+    CreateOrderRequest:
+      type: object
+      required: [customer_id, warehouse_id, items]
+      additionalProperties: false
+      properties:
+        customer_id: { type: string, format: uuid }
+        warehouse_id:
+          type: string
+          format: uuid
+          description: Fulfillment warehouse selected for the order.
+        items:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/OrderItem" }
+    Order:
+      type: object
+      required:
+        [
+          id,
+          customer_id,
+          warehouse_id,
+          status,
+          currency,
+          total_amount_minor,
+          items,
+          created_at,
+          updated_at,
+        ]
+      properties:
+        id: { type: string, format: uuid }
+        customer_id: { type: string, format: uuid }
+        warehouse_id: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [PENDING, CONFIRMED, FAILED]
+        currency:
+          type: string
+          enum: [RUB]
+        total_amount_minor:
+          type: integer
+          format: int64
+          description: Total in kopecks.
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/OrderItem" }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            request_id: { type: string }
+  responses:
+    BadRequest:
+      description: Malformed request.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    ValidationError:
+      description: Request is syntactically valid but violates domain rules.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    InternalError:
+      description: Internal server error.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }

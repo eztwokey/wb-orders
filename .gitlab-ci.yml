@@ -1,0 +1,170 @@
+stages:
+  - lint
+  - test
+  - build
+  - docker
+  - deploy
+
+default:
+  interruptible: true
+  cache:
+    key: go-${CI_COMMIT_REF_SLUG}
+    paths:
+      - .cache/go-build
+      - .cache/go-mod
+
+.go-job:
+  image: golang:1.26-alpine
+  variables:
+    GOCACHE: ${CI_PROJECT_DIR}/.cache/go-build
+    GOMODCACHE: ${CI_PROJECT_DIR}/.cache/go-mod
+  before_script:
+    - go mod download
+
+format:
+  extends: .go-job
+  stage: lint
+  script:
+    - test -z "$(find . -type f -name '*.go' -exec gofmt -l {} +)"
+    - go mod tidy
+    - git diff --exit-code -- go.mod go.sum
+
+vet:
+  extends: .go-job
+  stage: lint
+  script:
+    - go vet ./...
+
+golangci-lint:
+  image: golangci/golangci-lint:v2.12.2-alpine
+  stage: lint
+  script:
+    - golangci-lint run ./...
+
+unit-test:
+  extends: .go-job
+  stage: test
+  script:
+    - go test -coverprofile=coverage.out ./...
+  artifacts:
+    when: always
+    paths: [coverage.out]
+    expire_in: 7 days
+
+integration-test:
+  extends: .go-job
+  stage: test
+  services:
+    - name: postgres:17-alpine
+      alias: postgres
+    - name: apache/kafka:4.2.1
+      alias: kafka
+  variables:
+    POSTGRES_DB: wb_orders_test
+    POSTGRES_USER: wb_orders
+    POSTGRES_PASSWORD: wb_orders
+    TEST_DATABASE_URL: postgres://wb_orders:wb_orders@postgres:5432/wb_orders_test?sslmode=disable
+    TEST_KAFKA_BROKERS: kafka:9092
+    CLUSTER_ID: 4L6g3nShT-eMCtK--X86sw
+    KAFKA_NODE_ID: "1"
+    KAFKA_PROCESS_ROLES: broker,controller
+    KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+    KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+    KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+    KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+    KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+    KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+    KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+    KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+    KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+  before_script:
+    - apk add --no-cache postgresql-client
+    - until pg_isready -h postgres -U wb_orders -d wb_orders_test; do sleep 1; done
+    - for migration in migrations/*.up.sql; do psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f "$migration"; done
+    - go mod download
+  script:
+    - go test -tags=integration ./internal/order ./internal/consumer ./internal/outbox ./internal/platform/kafka
+
+race-test:
+  extends: .go-job
+  image: golang:1.26-bookworm
+  stage: test
+  script:
+    - CGO_ENABLED=1 go test -race ./internal/workerpool ./internal/processing ./internal/consumer
+
+build-binaries:
+  extends: .go-job
+  stage: build
+  script:
+    - mkdir -p dist
+    - CGO_ENABLED=0 go build -trimpath -o dist/order-service ./cmd/order-service
+    - CGO_ENABLED=0 go build -trimpath -o dist/outbox-publisher ./cmd/outbox-publisher
+    - CGO_ENABLED=0 go build -trimpath -o dist/order-worker ./cmd/order-worker
+  artifacts:
+    paths: [dist/]
+    expire_in: 7 days
+
+docker-images:
+  image: docker:27-cli
+  stage: docker
+  services:
+    - name: docker:27-dind
+      command: ["--tls=false"]
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+  needs: [unit-test, integration-test, race-test, build-binaries]
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  script:
+    - |
+      for service in order-service outbox-publisher order-worker; do
+        image="$CI_REGISTRY_IMAGE/$service"
+        docker build --build-arg SERVICE="$service" -f docker/Dockerfile -t "$image:$CI_COMMIT_SHA" .
+        docker push "$image:$CI_COMMIT_SHA"
+        if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
+          docker tag "$image:$CI_COMMIT_SHA" "$image:latest"
+          docker push "$image:latest"
+        fi
+      done
+    - docker build -f docker/Migrations.Dockerfile -t "$CI_REGISTRY_IMAGE/migrate:$CI_COMMIT_SHA" .
+    - docker push "$CI_REGISTRY_IMAGE/migrate:$CI_COMMIT_SHA"
+    - |
+      if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
+        docker tag "$CI_REGISTRY_IMAGE/migrate:$CI_COMMIT_SHA" "$CI_REGISTRY_IMAGE/migrate:latest"
+        docker push "$CI_REGISTRY_IMAGE/migrate:latest"
+      fi
+  rules:
+    - if: "$CI_COMMIT_BRANCH"
+
+deploy-staging:
+  image:
+    name: bitnami/kubectl:1.32
+    entrypoint: [""]
+  stage: deploy
+  needs: [docker-images]
+  environment:
+    name: staging
+  before_script:
+    - test -n "$KUBE_CONFIG"
+    - mkdir -p "${CI_PROJECT_DIR}/.kube"
+    - echo "$KUBE_CONFIG" | base64 -d > "${CI_PROJECT_DIR}/.kube/config"
+    - export KUBECONFIG="${CI_PROJECT_DIR}/.kube/config"
+  script:
+    - kubectl apply -f deploy/k8s/namespace.yaml
+    - kubectl apply -f deploy/k8s/configmap.yaml
+    - kubectl apply -f deploy/k8s/service.yaml
+    - kubectl -n wb-orders delete job wb-orders-migrate --ignore-not-found=true
+    - sed "s#registry.gitlab.com/your-gitlab-namespace/wb-orders/migrate:latest#$CI_REGISTRY_IMAGE/migrate:$CI_COMMIT_SHA#" deploy/k8s/migration-job.yaml | kubectl apply -f -
+    - kubectl -n wb-orders wait --for=condition=complete job/wb-orders-migrate --timeout=180s
+    - |
+      sed \
+        -e "s#registry.gitlab.com/your-gitlab-namespace/wb-orders/order-service:latest#$CI_REGISTRY_IMAGE/order-service:$CI_COMMIT_SHA#" \
+        -e "s#registry.gitlab.com/your-gitlab-namespace/wb-orders/outbox-publisher:latest#$CI_REGISTRY_IMAGE/outbox-publisher:$CI_COMMIT_SHA#" \
+        -e "s#registry.gitlab.com/your-gitlab-namespace/wb-orders/order-worker:latest#$CI_REGISTRY_IMAGE/order-worker:$CI_COMMIT_SHA#" \
+        deploy/k8s/deployments.yaml | kubectl apply -f -
+    - kubectl -n wb-orders rollout status deployment/order-service --timeout=180s
+    - kubectl -n wb-orders rollout status deployment/outbox-publisher --timeout=180s
+    - kubectl -n wb-orders rollout status deployment/order-worker --timeout=180s
+  rules:
+    - if: "$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH"

@@ -1,0 +1,136 @@
+name: wb-orders
+
+x-app: &app
+  build:
+    context: .
+    dockerfile: docker/Dockerfile
+  restart: unless-stopped
+  environment: &app-environment
+    DATABASE_URL: postgres://wb_orders:wb_orders@postgres:5432/wb_orders?sslmode=disable
+    KAFKA_BROKERS: kafka:9092
+    LOG_LEVEL: debug
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+    kafka-init:
+      condition: service_completed_successfully
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: wb_orders
+      POSTGRES_USER: wb_orders
+      POSTGRES_PASSWORD: wb_orders
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wb_orders -d wb_orders"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    image: migrate/migrate:v4.18.2
+    command:
+      [
+        "-path",
+        "/migrations",
+        "-database",
+        "postgres://wb_orders:wb_orders@postgres:5432/wb_orders?sslmode=disable",
+        "up",
+      ]
+    volumes:
+      - ./migrations:/migrations:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  kafka:
+    image: apache/kafka:4.2.1
+    ports:
+      - "29092:29092"
+    environment:
+      CLUSTER_ID: 4L6g3nShT-eMCtK--X86sw
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,PLAINTEXT_HOST://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  kafka-init:
+    image: apache/kafka:4.2.1
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-ec"]
+    command: >
+      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic wb.orders.created --partitions 6 --replication-factor 1;
+      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic wb.orders.status-changed --partitions 6 --replication-factor 1;
+      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic wb.orders.created.retry --partitions 6 --replication-factor 1;
+      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic wb.orders.created.dlq --partitions 6 --replication-factor 1
+    restart: "no"
+
+  order-service:
+    <<: *app
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args: { SERVICE: order-service }
+    environment:
+      <<: *app-environment
+      HEALTH_ADDR: :8080
+    ports:
+      - "8080:8080"
+
+  outbox-publisher:
+    <<: *app
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args: { SERVICE: outbox-publisher }
+    environment:
+      <<: *app-environment
+      HEALTH_ADDR: :8081
+      OUTBOX_WORKERS: 4
+      OUTBOX_BATCH_SIZE: 50
+      OUTBOX_LEASE_DURATION: 4m
+    ports:
+      - "8081:8081"
+
+  order-worker:
+    <<: *app
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args: { SERVICE: order-worker }
+    environment:
+      <<: *app-environment
+      HEALTH_ADDR: :8082
+      ORDER_WORKERS: 8
+      KAFKA_BATCH_SIZE: 16
+    ports:
+      - "8082:8082"
+
+volumes:
+  postgres-data:
