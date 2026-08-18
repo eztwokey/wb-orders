@@ -1,8 +1,6 @@
 # wb-orders
 
-`wb-orders` — мой учебный backend-сервис для обработки заказов маркетплейса. Я сделал его после обучения в WB Tech School, чтобы на практике разобраться с event-driven архитектурой, Kafka, Transactional Outbox и конкурентным программированием в Go.
-
-Это независимый учебный проект, не связанный с внутренними системами Wildberries.
+`wb-orders` — мой учебный backend-сервис для обработки заказов маркетплейса.
 
 ## Архитектура
 
@@ -64,19 +62,8 @@ Fan-Out запускает операции, Fan-In собирает резул�
 
 Уникальный ключ `(consumer_name, event_id)` делает consumer идемпотентным. Повторная доставка того же события не изменит заказ второй раз.
 
-Для временных ошибок предусмотрены exponential backoff и topic `wb.orders.created.retry`. После исчерпания попыток или при неисправимом сообщении событие попадает в `wb.orders.created.dlq`.
 
 ## Быстрый запуск на Ubuntu
-
-Понадобятся Git, curl, [Docker Engine и Docker Compose plugin](https://docs.docker.com/engine/install/ubuntu/). Команды ниже предполагают, что текущему пользователю разрешен запуск Docker без `sudo`.
-
-Проверка окружения:
-
-```bash
-git --version
-docker --version
-docker compose version
-```
 
 Клонирование и запуск проекта:
 
@@ -87,7 +74,6 @@ docker compose up -d --build
 docker compose ps
 ```
 
-Docker Compose поднимет PostgreSQL, Kafka, применит миграции и запустит все три приложения.
 
 Проверка API:
 
@@ -112,7 +98,7 @@ curl -i -X POST http://localhost:8080/api/v1/orders \
   }'
 ```
 
-Скопируй `id` заказа из ответа и через несколько секунд проверь статус:
+Скопировать `id` заказа из ответа и через несколько секунд проверить статус:
 
 ```bash
 curl -fsS http://localhost:8080/api/v1/orders/ORDER_ID
@@ -126,8 +112,6 @@ curl -fsS http://localhost:8080/api/v1/orders/ORDER_ID
 docker compose logs -f
 docker compose down
 ```
-
-Если Docker отвечает `permission denied`, выполни команды с `sudo` или настрой [запуск Docker без root](https://docs.docker.com/engine/install/linux-postinstall/).
 
 ## Тесты
 
@@ -144,14 +128,5 @@ go test -race ./...
 docker run --rm -v "$(pwd):/app" -w /app golang:1.26 go test ./...
 docker run --rm -v "$(pwd):/app" -w /app golang:1.26 go test -race ./...
 ```
-
-## Где смотреть детали
-
-- [`api/openapi.yaml`](api/openapi.yaml) — описание REST API;
-- [`docs/architecture.md`](docs/architecture.md) — подробная архитектура и потоки данных;
-- [`docs/adr`](docs/adr) — принятые архитектурные решения;
-- [`migrations`](migrations) — схема PostgreSQL;
-- [`deploy/k8s`](deploy/k8s) — Kubernetes-манифесты;
-- [`.gitlab-ci.yml`](.gitlab-ci.yml) — pipeline `lint → test → build → docker → deploy`.
 
 В проекте также есть structured JSON logs, Prometheus-метрики, health/readiness endpoints и graceful shutdown по `SIGTERM`/`SIGINT`.
